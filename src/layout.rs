@@ -1,50 +1,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // layout.rs
-//
-// Grid + scatter-position computation, and the two font-size functions.
-//
-// Font-size philosophy
-// ────────────────────
-// Two distinct sizes are computed each frame:
-//
-//   base_size   — the size used at startup when *all* apps are shown.
-//                 Derived from the 80th-percentile name length so the majority
-//                 of names fill their cells nicely (a few very-long outliers
-//                 may overflow their cell boundary, but they're very dim so it
-//                 reads fine visually).
-//
-//   match_size  — the target size for apps that match the current query.
-//                 Derived from the *longest matching name* in the conceptual
-//                 grid those M apps would occupy if they were alone on screen.
-//                 Grows smoothly as fewer names match (fewer → bigger cells →
-//                 bigger font), approaching max_font_size when only one matches.
-//
-// Scatter positions
-// ─────────────────
-// calculate_grid() gives us a logical grid.  scatter_positions() adds a small
-// deterministic jitter (±JITTER fraction of cell dimensions) so the layout
-// looks organic rather than a rigid spreadsheet, while still guaranteeing
-// every app stays within its cell's neighborhood and never overlaps a neighbor.
 // ─────────────────────────────────────────────────────────────────────────────
 
 use cairo::{Context, FontSlant, FontWeight, Format, ImageSurface};
 
 // ── Grid ─────────────────────────────────────────────────────────────────────
 
-/// Calculate (cols, rows) so that cols × rows ≥ n and the cells are as
-/// square as possible given the screen aspect ratio.
 pub fn calculate_grid(n: usize, screen_w: u32, screen_h: u32) -> (usize, usize) {
     if n <= 1 {
         return (1, 1);
     }
-
     let aspect = screen_w as f64 / screen_h as f64;
     let cols_f  = ((n as f64) * aspect).sqrt();
-
     let mut best_cols = 1usize;
     let mut best_rows = n;
     let mut best_waste = usize::MAX;
-
     for cols in [cols_f as usize, cols_f as usize + 1] {
         let cols = cols.max(1);
         let rows = (n + cols - 1) / cols;
@@ -55,51 +25,33 @@ pub fn calculate_grid(n: usize, screen_w: u32, screen_h: u32) -> (usize, usize) 
             best_rows  = rows;
         }
     }
-
     (best_cols.max(1), best_rows.max(1))
 }
 
 // ── Scatter positions ─────────────────────────────────────────────────────────
 
-/// Compute stable (cx, cy) pixel positions for `n` apps.
-/// Uses the logical grid as a base, then adds a small deterministic jitter
-/// so positions look organic while remaining within their cell.
+/// Raw jittered grid positions — call `settle_positions` afterwards to
+/// resolve any overlaps at the base font size.
 pub fn scatter_positions(n: usize, screen_w: u32, screen_h: u32) -> Vec<(f64, f64)> {
-    if n == 0 {
-        return vec![];
-    }
-
-    let (cols, rows) = calculate_grid(n, screen_w, screen_h);
+    if n == 0 { return vec![]; }
+    let (cols, _rows) = calculate_grid(n, screen_w, screen_h);
     let cell_w = screen_w as f64 / cols as f64;
+    let (_, rows) = calculate_grid(n, screen_w, screen_h);
     let cell_h = screen_h as f64 / rows as f64;
-
-    // Jitter magnitude: ±JITTER fraction of cell dimension.
-    // 0.20 gives enough "randomness" without any two names ever being
-    // closer than ~60 % of a cell apart.
     const JITTER: f64 = 0.20;
-
-    (0..n)
-        .map(|i| {
-            let col = i % cols;
-            let row = i / cols;
-            let cx = col as f64 * cell_w + cell_w / 2.0;
-            let cy = row as f64 * cell_h + cell_h / 2.0;
-
-            // Deterministic jitter: no RNG dependency, pure integer hashing.
-            let jx = pseudo_rand(i.wrapping_mul(2)) * 2.0 - 1.0;      // −1…+1
-            let jy = pseudo_rand(i.wrapping_mul(2).wrapping_add(1)) * 2.0 - 1.0;
-
-            let x = (cx + jx * cell_w * JITTER)
-                .clamp(cell_w * 0.15, screen_w as f64 - cell_w * 0.15);
-            let y = (cy + jy * cell_h * JITTER)
-                .clamp(cell_h * 0.15, screen_h as f64 - cell_h * 0.15);
-
-            (x, y)
-        })
-        .collect()
+    (0..n).map(|i| {
+        let col = i % cols;
+        let row = i / cols;
+        let cx = col as f64 * cell_w + cell_w / 2.0;
+        let cy = row as f64 * cell_h + cell_h / 2.0;
+        let jx = pseudo_rand(i.wrapping_mul(2)) * 2.0 - 1.0;
+        let jy = pseudo_rand(i.wrapping_mul(2).wrapping_add(1)) * 2.0 - 1.0;
+        let x = (cx + jx * cell_w * JITTER).clamp(cell_w * 0.15, screen_w as f64 - cell_w * 0.15);
+        let y = (cy + jy * cell_h * JITTER).clamp(cell_h * 0.15, screen_h as f64 - cell_h * 0.15);
+        (x, y)
+    }).collect()
 }
 
-/// Cheap, deterministic hash for jitter — no external crate needed.
 fn pseudo_rand(seed: usize) -> f64 {
     let x = seed.wrapping_mul(2_654_435_761).wrapping_add(0x9e37_79b9);
     let x = x ^ (x >> 16);
@@ -108,52 +60,110 @@ fn pseudo_rand(seed: usize) -> f64 {
     (x & 0xFFFF) as f64 / 65_535.0
 }
 
-// ── Font sizes ────────────────────────────────────────────────────────────────
-
-/// Compute the base font size to use at startup when ALL apps are visible.
-///
-/// Uses the 80th-percentile name (by character count) as the reference, so
-/// most names fill their cell nicely.  Very long outliers may slightly overflow
-/// their cell but they're rendered very dimly, so it looks intentional.
-pub fn compute_base_font_size(
-    names:       &[&str],
-    screen_w:    u32,
-    screen_h:    u32,
+/// Run AABB separation on `initial` positions so that at `font_size` no two
+/// names overlap.  Called once at startup in `compute_layout` — result is
+/// stored in `App::app_positions` so the per-frame render loop starts from
+/// a clean, non-overlapping state.
+pub fn settle_positions(
+    names:      &[&str],
+    initial:    &[(f64, f64)],
+    font_size:  f64,
     font_family: &str,
-    min_size:    f64,
-    max_size:    f64,
-) -> f64 {
-    let n = names.len();
-    if n == 0 {
-        return min_size;
+    screen_w:   u32,
+    screen_h:   u32,
+) -> Vec<(f64, f64)> {
+    const MARGIN: f64 = 8.0;
+    const PASSES: usize = 40;
+
+    let dummy = ImageSurface::create(Format::ARgb32, 1, 1).expect("dummy");
+    let cr    = Context::new(&dummy).expect("ctx");
+    cr.select_font_face(font_family, FontSlant::Normal, FontWeight::Normal);
+    cr.set_font_size(font_size);
+
+    let half: Vec<(f64, f64)> = names.iter().map(|name| {
+        let ext = cr.text_extents(name).unwrap();
+        (ext.width() / 2.0, ext.height() / 2.0)
+    }).collect();
+
+    let mut pos = initial.to_vec();
+    let n = pos.len();
+
+    for _ in 0..PASSES {
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let (hw_i, hh_i) = half[i];
+                let (hw_j, hh_j) = half[j];
+                let (cx_i, cy_i) = pos[i];
+                let (cx_j, cy_j) = pos[j];
+                let dx = cx_j - cx_i;
+                let dy = cy_j - cy_i;
+                let ov_x = (hw_i + hw_j + MARGIN) - dx.abs();
+                let ov_y = (hh_i + hh_j + MARGIN) - dy.abs();
+                if ov_x > 0.0 && ov_y > 0.0 {
+                    let (px, py) = if ov_x <= ov_y {
+                        let s = if dx >= 0.0 { 1.0 } else { -1.0 };
+                        (ov_x / 2.0 * s, 0.0)
+                    } else {
+                        let s = if dy >= 0.0 { 1.0 } else { -1.0 };
+                        (0.0, ov_y / 2.0 * s)
+                    };
+                    pos[i] = (cx_i - px, cy_i - py);
+                    pos[j] = (cx_j + px, cy_j + py);
+                }
+            }
+        }
+        for i in 0..n {
+            let (hw, hh) = half[i];
+            let (cx, cy) = pos[i];
+            pos[i] = (
+                cx.clamp(hw + MARGIN, screen_w as f64 - hw - MARGIN),
+                cy.clamp(hh + MARGIN, screen_h as f64 - hh - MARGIN),
+            );
+        }
     }
-
-    let (cols, rows) = calculate_grid(n, screen_w, screen_h);
-    let cell_w = screen_w as f64 / cols as f64;
-    let cell_h = screen_h as f64 / rows as f64;
-
-    // 80th-percentile name by length.  Sorting by char count lets us pick a
-    // representative without being dragged down by one unusually long outlier.
-    let mut lengths: Vec<usize> = names.iter().map(|s| s.chars().count()).collect();
-    lengths.sort_unstable();
-    let p80_len = lengths[((n as f64 * 0.80) as usize).min(n - 1)];
-
-    // Find a name whose length is closest to p80_len.
-    let reference = names
-        .iter()
-        .min_by_key(|s| s.chars().count().abs_diff(p80_len))
-        .copied()
-        .unwrap_or(names[0]);
-
-    // Use 85 % of cell dimensions as the text budget.
-    fit_text_in_box(reference, cell_w * 0.94, cell_h * 0.94, font_family, min_size, max_size)
+    pos
 }
 
-/// Compute the target size for apps that *match* the current query.
+// ── Font sizes ────────────────────────────────────────────────────────────────
+
+/// Base font size at startup (all apps visible).
 ///
-/// Conceptually places the M matching apps in their own full-screen grid and
-/// binary-searches for the largest font that fits the longest matching name.
-/// The result is always ≥ `base_size` and ≤ `max_size`.
+/// Uses a **screen-fill-ratio** formula instead of cell-based fitting:
+///
+///   font = sqrt(FILL × W × H / (N × avg_len × CHAR_W × LINE_H))
+///
+/// This means fewer apps on screen → bigger font, regardless of grid cell
+/// size.  The resulting names may overlap their neighbours (especially long
+/// ones) — `settle_positions` is called once in `compute_layout` to resolve
+/// those overlaps so the startup view is always clean.
+pub fn compute_base_font_size(
+    names:    &[&str],
+    screen_w: u32,
+    screen_h: u32,
+    _font_family: &str,   // analytical formula; no Cairo needed
+    min_size: f64,
+    max_size: f64,
+) -> f64 {
+    let n = names.len();
+    if n == 0 { return min_size; }
+
+    let avg_len = names.iter().map(|s| s.chars().count()).sum::<usize>() as f64 / n as f64;
+    let avg_len = avg_len.max(1.0);
+
+    let screen_area = screen_w as f64 * screen_h as f64;
+
+    // Target: ~55 % of screen area covered by name bounding boxes.
+    // At size s: avg text area ≈ avg_len × 0.55s × 1.20s = 0.66 × avg_len × s²
+    // N × 0.66 × avg_len × s² = FILL × W × H  →  s = sqrt(FILL×W×H / (N×0.66×avg_len))
+    const FILL:      f64 = 0.55;
+    const CHAR_AREA: f64 = 0.55 * 1.20; // width_ratio × height_ratio ≈ 0.66
+
+    let s = (FILL * screen_area / (n as f64 * CHAR_AREA * avg_len)).sqrt();
+    s.clamp(min_size, max_size)
+}
+
+/// Target size for apps matching the current query.
+/// Grows as fewer names match (smaller conceptual grid → bigger cells → bigger font).
 pub fn compute_match_font_size(
     matching_names: &[&str],
     screen_w:       u32,
@@ -163,32 +173,25 @@ pub fn compute_match_font_size(
     max_size:       f64,
 ) -> f64 {
     let n = matching_names.len();
-    if n == 0 {
-        return base_size;
-    }
+    if n == 0 { return base_size; }
 
     let (cols, rows) = calculate_grid(n, screen_w, screen_h);
     let cell_w = screen_w as f64 / cols as f64;
     let cell_h = screen_h as f64 / rows as f64;
 
-    // Use the longest matching name so no matching app overflows.
     let longest = matching_names
         .iter()
         .max_by_key(|s| s.chars().count())
         .copied()
         .unwrap_or("");
 
-    if longest.is_empty() {
-        return base_size;
-    }
+    if longest.is_empty() { return base_size; }
 
     fit_text_in_box(longest, cell_w * 0.85, cell_h * 0.85, font_family, base_size, max_size)
 }
 
 // ── Internal helper ───────────────────────────────────────────────────────────
 
-/// Binary-search for the largest font size where `text` fits in
-/// `max_w × max_h` pixels using the given font face.
 fn fit_text_in_box(
     text:        &str,
     max_w:       f64,
@@ -197,27 +200,16 @@ fn fit_text_in_box(
     lo_bound:    f64,
     hi_bound:    f64,
 ) -> f64 {
-    // Throw-away 1×1 surface just for text measurement.
     let dummy = ImageSurface::create(Format::ARgb32, 1, 1).expect("dummy surface");
     let cr    = Context::new(&dummy).expect("dummy context");
     cr.select_font_face(font_family, FontSlant::Normal, FontWeight::Normal);
-
-    let mut lo   = lo_bound;
-    let mut hi   = hi_bound;
-    let mut best = lo_bound;
-
-    // 24 iterations → sub-pixel precision.
+    let mut lo = lo_bound; let mut hi = hi_bound; let mut best = lo_bound;
     for _ in 0..24 {
         let mid = (lo + hi) / 2.0;
         cr.set_font_size(mid);
         let ext = cr.text_extents(text).unwrap();
-        if ext.width() <= max_w && ext.height() <= max_h {
-            best = mid;
-            lo   = mid;
-        } else {
-            hi = mid;
-        }
+        if ext.width() <= max_w && ext.height() <= max_h { best = mid; lo = mid; }
+        else { hi = mid; }
     }
-
     best.clamp(lo_bound, hi_bound)
 }

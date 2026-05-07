@@ -139,11 +139,11 @@ impl App {
         self.cols = c;
         self.rows = r;
 
-        // Stable scatter positions — recomputed any time the screen size changes.
-        self.app_positions =
+        // Raw jittered positions — may overlap at base font size.
+        let raw_positions =
             layout::scatter_positions(self.apps.len(), self.width, self.height);
 
-        // Base font size: generous startup size using 80th-percentile name.
+        // Base font size: fill-ratio formula, naturally bigger with fewer apps.
         if !self.apps.is_empty() {
             let names: Vec<&str> = self.apps.iter().map(|a| a.name.as_str()).collect();
             self.base_font_size = layout::compute_base_font_size(
@@ -154,6 +154,19 @@ impl App {
                 self.config.theme.min_font_size,
                 self.config.theme.max_font_size,
             );
+
+            // Pre-settle positions so startup view has zero overlaps.
+            // This is O(N²) but runs only once per screen configure, not per frame.
+            self.app_positions = layout::settle_positions(
+                &names,
+                &raw_positions,
+                self.base_font_size,
+                &self.config.theme.font_family,
+                self.width,
+                self.height,
+            );
+        } else {
+            self.app_positions = raw_positions;
         }
 
         // (Re)initialise per-app sizes so they match the new base.
