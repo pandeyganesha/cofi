@@ -109,53 +109,46 @@ pub fn draw_frame(
 
         // ── Font size (intended) ──────────────────────────────────────────────
         // Selected gets a small extra bump on top of its already-grown peak.
-        let intended_size = if is_sel && matches {
+        let size = if is_sel && matches {
             (peak * 1.12).min(config.theme.max_font_size)
         } else {
             peak
         };
+        cr.set_font_size(size);
 
-        // ── Position: centre the text on the scatter point ────────────────────
+        // ── Position: centre on scatter point, clamp to stay on-screen ────────
+        //
+        // We allow the font to reach its full intended size without capping.
+        // If the text would overflow an edge, we slide the draw anchor inward
+        // by exactly the overflow amount — the text "drifts" toward centre but
+        // is never truncated and always reaches its full size.  Because matching
+        // apps are rendered bright and dim names are ~18% opacity, the correct
+        // answer is always visually dominant even if it slightly overlaps a dim
+        // neighbour after sliding.
+        const MARGIN: f64 = 8.0; // breathing room from the absolute screen edge
+
         let (cx, cy) = app_positions.get(idx).copied().unwrap_or((
             w as f64 / 2.0,
             h as f64 / 2.0,
         ));
 
-        // ── Edge cap (Option B) ───────────────────────────────────────────────
-        //
-        // The text is centred on (cx, cy).  Its half-width must not exceed the
-        // distance from cx to the nearest horizontal screen edge, and likewise
-        // for the vertical axis.  We binary-search for the largest font size in
-        // [min_font_size, intended_size] that keeps the text fully on-screen.
-        //
-        // We reuse the existing `cr` for text measurement (no extra allocations).
-        // 20 iterations gives < 0.001 px precision — more than enough.
-        const EDGE_MARGIN: f64 = 8.0; // px of breathing room from screen edge
-        let max_half_w = (cx.min(w as f64 - cx) - EDGE_MARGIN).max(1.0);
-        let max_half_h = (cy.min(h as f64 - cy) - EDGE_MARGIN).max(1.0);
-
-        let effective_size = {
-            let mut lo   = config.theme.min_font_size.max(1.0);
-            let mut hi   = intended_size;
-            let mut best = lo;
-            for _ in 0..20 {
-                let mid = (lo + hi) / 2.0;
-                cr.set_font_size(mid);
-                let ext = cr.text_extents(&app.name).unwrap();
-                if ext.width() / 2.0 <= max_half_w && ext.height() / 2.0 <= max_half_h {
-                    best = mid;
-                    lo   = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            best
-        };
-        cr.set_font_size(effective_size);
-
         let ext = cr.text_extents(&app.name).unwrap();
-        let tx  = cx - ext.x_bearing() - ext.width()  / 2.0;
-        let ty  = cy - ext.y_bearing() - ext.height() / 2.0;
+
+        // Ideal baseline origin so the glyph box is centred on (cx, cy).
+        let tx_ideal = cx - ext.x_bearing() - ext.width()  / 2.0;
+        let ty_ideal = cy - ext.y_bearing() - ext.height() / 2.0;
+
+        // Left/right: keep [tx + x_bearing, tx + x_bearing + width] inside
+        // [MARGIN, W - MARGIN].
+        let tx = tx_ideal
+            .max(MARGIN - ext.x_bearing())                              // left edge
+            .min(w as f64 - MARGIN - ext.x_bearing() - ext.width());   // right edge
+
+        // Top/bottom: keep [ty + y_bearing, ty + y_bearing + height] inside
+        // [MARGIN, H - MARGIN].
+        let ty = ty_ideal
+            .max(MARGIN - ext.y_bearing())                              // top edge
+            .min(h as f64 - MARGIN - ext.y_bearing() - ext.height());  // bottom edge
 
         cr.move_to(tx, ty);
         cr.show_text(&app.name).unwrap();
