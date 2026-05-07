@@ -73,8 +73,6 @@ const KEY_KP_ENTER: u32 = 0xff8d;
 const KEY_BACKSPACE: u32 = 0xff08;
 const KEY_UP: u32 = 0xff52;
 const KEY_DOWN: u32 = 0xff54;
-const KEY_LEFT: u32 = 0xff51;
-const KEY_RIGHT: u32 = 0xff53;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App — the single struct that holds every piece of state
@@ -260,14 +258,6 @@ impl App {
                 self.navigate(nav::Direction::Down);
                 self.draw(qh);
             }
-            KEY_LEFT => {
-                self.navigate(nav::Direction::Left);
-                self.draw(qh);
-            }
-            KEY_RIGHT => {
-                self.navigate(nav::Direction::Right);
-                self.draw(qh);
-            }
             _ => {
                 if let Some(text) = event.utf8 {
                     if !text.chars().all(|c| c.is_control()) {
@@ -302,7 +292,13 @@ impl App {
             .filter(|s| navigatable.contains(s))
             .unwrap_or(navigatable[0]);
 
-        self.selected = Some(nav::navigate(&navigatable, current, self.cols, dir));
+        self.selected = Some(nav::navigate(
+            &navigatable,
+            current,
+            &self.app_positions,
+            self.base_font_size,
+            dir,
+        ));
     }
 
     // ── Launch ────────────────────────────────────────────────────────────────
