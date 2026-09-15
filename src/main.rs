@@ -15,6 +15,6 @@ fn main() -> std::io::Result<()> {
             } 
         }
     }
-    display::scatter_on_screen(&app_names);
+    display::scatter_on_screen(app_names);
     Ok(())
 }
