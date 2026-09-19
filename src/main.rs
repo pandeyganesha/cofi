@@ -1,47 +1,44 @@
 mod display;
 
 use std::fs;
-use std::path::Path;
 use freedesktop_entry_parser::parse_entry;
 
-fn show_on_ui(path: &String) -> bool {
+// It should read a value for any given key under Desktop Entry
+fn get_value_for_key(path: &String, key: &String) -> String {
     let entry = match parse_entry(path){
         Ok(entry) => entry,
-        Err(_) => return false,
+        Err(_) => return String::from(""),
     };
 
     let value = entry
-    .section("Desktop Entry")
-    .expect("Did not find Desktop Entry")
-    .attr("NoDisplay")
-    .get(0)
-    .expect("No Display exist")
-    .to_lowercase();
+    .get("Desktop Entry", key)
+    .and_then(|values| values.first())
+    .map(String::as_str)
+    .unwrap_or("");
 
-    match value.as_str() {
-        "true" => true,
-        _ => false
-    }
+    value.to_string()
+
 }
 
 fn main() -> std::io::Result<()> {
-    let mut app_names: Vec<String> = Vec::new();
+    let mut app_paths: Vec<String> = Vec::new();
 
     for entry in fs::read_dir("/usr/share/applications")? {
         let entry = entry ?;
         let path = entry.path();
 
         if path.is_file(){
-            if let Some(name) = path.file_name(){
-                app_names.push(name.to_string_lossy().to_string());
-            } 
+            app_paths.push(path.to_string_lossy().to_string());
         }
     }
-    // let filtered_apps: Vec<String> = app_names
-    // .iter()
-    // .filter(|app| show_on_ui(app))
-    // .collect();
+    // println!("{:#?}", app_paths);
+    let filtered_apps: Vec<String> = app_paths
+    .into_iter()
+    .map(|app_path| get_value_for_key(&app_path, &String::from("Name")))
+    .collect();
 
-    display::scatter_on_screen(app_names);
+    // println!("{:#?}", filtered_apps);
+
+    display::scatter_on_screen(filtered_apps);
     Ok(())
 }
