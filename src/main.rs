@@ -32,12 +32,17 @@ fn main() -> std::io::Result<()> {
         }
     }
     // println!("{:#?}", app_paths);
+    // Generic names which are not set to NoDisplay and are not empty
     let filtered_apps: Vec<String> = app_paths
     .into_iter()
+    .filter(|app_path| get_value_for_key(&app_path, &String::from("NoDisplay")).to_lowercase() != "true")
     .map(|app_path| get_value_for_key(&app_path, &String::from("Name")))
+    .filter(|name| !name.is_empty())
     .collect();
 
-    // println!("{:#?}", filtered_apps);
+    println!("{:#?}", filtered_apps);
+    println!("{:#?}", filtered_apps.len());
+
 
     display::scatter_on_screen(filtered_apps);
     Ok(())
